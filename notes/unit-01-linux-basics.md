@@ -1,3 +1,35 @@
+## Ключевые выводы для дежурства
+
+### Hard vs Symlink
+- Hard link = второе имя того же inode (один файл, два пути)
+- Symlink = отдельный файл с записанным путём
+- Hard нельзя на директории и через границы ФС
+- Symlink ломается при удалении оригинала (становится dangling)
+- Проверка: `ls -li` → одинаковый inode + link count 2 = это hardlinks
+
+### df vs du
+- df: занятое на ФС (через ядро, statvfs)
+- du: сумма размеров файлов (через stat)
+- Page cache в RAM не виден ни тем ни другим
+- Расхождение df > du = почти всегда удалённые открытые файлы
+- Найти: `lsof | grep deleted`
+- Починить: рестарт держащего процесса systemctl restart app, либо kill -HUP <pid> (если приложение поддерживает reopen логов), или > /proc/<pid>/fd/<N> (агрессивно — обнулить файл через файловый дескриптор).
+
+### Поиск больших жирных файлов
+- `du -h --max-depth=1 / 2>/dev/null | sort -h`
+- `ncdu /` (если установлен — быстрее и интерактивно)
+
+### Топ процессов
+- По памяти: `ps aux --sort=-%mem | head`
+- По CPU: `ps aux --sort=-%cpu | head`
+- Интерактивно: `htop` (F6 — выбор сортировки)
+
+### lsof — что я могу делать с ним
+- Кто держит порт: `lsof -i :443`
+- Кто держит файл: `lsof /path/to/file`
+- Удалённые открытые: `lsof | grep deleted`
+- Что открыл процесс: `lsof -p <pid>`
+
 ## эксперимент с hard/symlink
 root@dnscache:/tmp/hlinkvsslink# echo "hello" > original.txt
 root@dnscache:/tmp/hlinkvsslink# ln original.txt hard.txt
