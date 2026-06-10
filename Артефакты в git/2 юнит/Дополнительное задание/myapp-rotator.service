@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate myapp.log if it exceeds 1MB
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rotate-log.sh

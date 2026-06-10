@@ -1,0 +1,6 @@
+[Unit]
+Description=Daily backup of /etc directory
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-etc.sh

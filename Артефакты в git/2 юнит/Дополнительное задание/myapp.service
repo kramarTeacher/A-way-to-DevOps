@@ -1,0 +1,12 @@
+[Unit]
+Description=My app that writes to log file
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/myapp.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

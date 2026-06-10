@@ -1,0 +1,15 @@
+[Unit]
+Description=Python script that writes to log every N seconds
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/log_writer.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
