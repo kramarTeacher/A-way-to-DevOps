@@ -2,8 +2,7 @@
 Description=Check log size every minute
 
 [Timer]
-OnCalendar=*:0/1
-Persistent=true
+OnCalendar=minutely
 
 [Install]
 WantedBy=timers.target

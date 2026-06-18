@@ -6,7 +6,7 @@ import logging
 logging.basicConfig(
 	level=logging.INFO,
 	format='%(asctime)s - %(message)s',
-	handlers=[logging.FileHandler('/var/log/myapp.log')]
+	handlers=[logging.WatchedFileHandler('/var/log/myapp.log')]
 )
 
 while True:

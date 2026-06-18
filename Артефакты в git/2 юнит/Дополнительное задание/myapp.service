@@ -5,8 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=myappuser
+Group=myappuser
 ExecStart=/usr/local/bin/myapp.py
-Restart=always
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

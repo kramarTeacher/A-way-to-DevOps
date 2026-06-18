@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User=logwriter
 ExecStart=/usr/local/bin/log_writer.py
 Restart=always
 RestartSec=10
