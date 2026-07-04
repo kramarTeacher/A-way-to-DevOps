@@ -72,6 +72,7 @@
 | 2    | 04.07 → 02.08   |        |        | Межвахта                                                                                                                 |
 | 2    | 04.07           | 2      |165 мин | с 07:30 по 11:15 выполнение экспериментов                                                                                |
 | 2    | 04.07           | 2      |120 мин | с 17:10 по 19:10 выполнение экспериментов, ответ на тест, заполнение                                                     |
+| 2    | 04.07           | 2      |30  мин | с 19:20 по 19:50 проверка claude, работа над ошибками - сделал anki по пробелам в знаниях                                |
 | ...  |                 |        |        |                                                                                                                          |
 
 **Анализ раз в 60 дней (конец цикла):**
@@ -670,26 +671,390 @@ notes/unit-03-network-dns.md   # все эксперименты с команд
 
 ## Юнит 4 🧠 — Nginx, HTTPS, reverse proxy
 
-**Тип нагрузки:** свежая голова обязательна (всё новое — конфиги nginx, certbot)
+**Тип нагрузки:** свежая голова обязательна — всё новое: конфиги nginx, certbot, TLS
 
 **Контекст:**
 - nginx: знаю что веб-сервер, **руками конфиги не писал** → проходим целиком
 - certbot: вообще не знаю → с нуля
+- Домен eakramar.ru на Cloudflare → нужно правильно переключить режим
 
-**Важно для российских VPS:** Let's Encrypt работает по всему миру, но иногда на `.ru` доменах HTTP-01 challenge может тупить. Альтернатива — DNS-01 challenge через Cloudflare API. Расскажу подробнее если упрёшься.
+### Особенность для меня: домен `.ru` + Cloudflare + Let's Encrypt
 
-**Теория (2ч):** 📺
-- [ ] Reverse proxy: 3+ причины использовать
-- [ ] TLS handshake концептуально
+**Проблема:** Let's Encrypt (LE) валидирует владение доменом двумя способами:
+- **HTTP-01 challenge:** LE делает HTTP-запрос к `http://твой-домен/.well-known/acme-challenge/TOKEN`. Твой сервер должен ответить правильным контентом. Требует чтобы LE-валидатор (сидит в США/ЕС) мог достучаться до твоего сервера на 80 порту.
+- **DNS-01 challenge:** ты создаёшь TXT-запись `_acme-challenge.твой-домен` с токеном. LE проверяет DNS. Не требует чтобы сервер был доступен извне.
 
-**Практика (5ч):** 🧠
-- [ ] Установка nginx
-- [ ] Статический сайт (твоя визитка)
-- [ ] Let's Encrypt через certbot, автообновление
-- [ ] Reverse proxy: nginx → app на localhost:3000
-- [ ] gzip, security headers (HSTS, X-Frame-Options, X-Content-Type-Options)
+**Для `.ru` VPS у российских провайдеров** HTTP-01 иногда работает, иногда нет — зависит от маршрутизации. Рабочее решение: **DNS-01 через Cloudflare API**. Плюс — не открываешь 80 порт, минус — надо создать API-токен CF.
 
-**Артефакт:** конфиг nginx в Git, сайт по HTTPS
+**Что делать по умолчанию:**
+1. Сначала попробуй HTTP-01 (проще). Если сработает — не усложняй.
+2. Если не сработает или хочешь надёжности — переходи на DNS-01 через Cloudflare API.
+
+### Что важно про Cloudflare-режимы для этого юнита
+
+**Cloudflare имеет два режима для A/AAAA записей:**
+- 🟠 **Proxied (оранжевое облачко)** — трафик идёт через CF-серверы. CF терминирует TLS у себя, к твоему серверу приходит уже расшифрованный трафик или пере-шифрованный CF-сертификатом. Реальный IP твоего сервера скрыт.
+- ⚪ **DNS only (серое облачко)** — CF просто отвечает на DNS-запросы, но не проксирует трафик. Клиент напрямую идёт к твоему серверу.
+
+**Для этого юнита:**
+- **Для HTTP-01 challenge** → **обязательно DNS only** (серое облачко). Иначе LE будет разговаривать с CF, а не с твоим сервером, и валидация не пройдёт (либо CF отдаст свой автосгенерированный сертификат, что тоже некорректно).
+- **Для DNS-01 challenge** — можно и proxied, и DNS only. LE проверяет только DNS, не HTTP.
+- **В юните 11** мы вернёмся к proxied режиму и настроим Origin Certificate от CF.
+
+### Теория (2ч) 📺
+
+- [ ] Reverse proxy: 3+ причины использовать (см. эксперимент 1)
+- [ ] TLS handshake — концептуально (не крипту, а последовательность: ClientHello → ServerHello → Certificate → Key Exchange → Finished)
+- [ ] Разница `location /api` vs `location /api/` vs `location ~ ^/api` (три типа матчинга: prefix, exact, regex)
+- [ ] Что такое SNI (Server Name Indication) — как один IP отдаёт разные сертификаты для разных доменов
+
+**Рекомендую:**
+- Официальная документация nginx: `nginx.org/en/docs/beginners_guide.html`
+- Видео "TLS Handshake Explained" — любой канал, 15 минут
+- `man certbot` — попытайся читать на английском (см. словарь ниже)
+
+---
+
+### Эксперимент 1 🧠 — Установка nginx + первый статический сайт
+
+**Что делаем:** поднимаем nginx с нуля, отдаём простую HTML-страничку.
+
+**Команды:**
+```bash
+# Установка
+sudo apt update && sudo apt install nginx -y
+
+# Проверка что установился и запустился
+systemctl status nginx
+ss -tlnp | grep nginx
+
+# Посмотреть дефолтный конфиг
+cat /etc/nginx/nginx.conf
+ls /etc/nginx/sites-enabled/
+ls /etc/nginx/sites-available/
+
+# Открой в браузере http://IP-твоего-сервера — увидишь "Welcome to nginx!"
+curl -v http://localhost/
+```
+
+**Что сделать:**
+1. Создай директорию `/var/www/eakramar.ru/` и положи туда `index.html` с любым содержимым (твоя визитка / "Hello from eakramar")
+2. Создай **свой server block** в `/etc/nginx/sites-available/eakramar.ru.conf`:
+   ```nginx
+   server {
+       listen 80;
+       server_name eakramar.ru www.eakramar.ru;
+       root /var/www/eakramar.ru;
+       index index.html;
+       
+       access_log /var/log/nginx/eakramar.access.log;
+       error_log /var/log/nginx/eakramar.error.log;
+   }
+   ```
+3. Активируй: `sudo ln -s /etc/nginx/sites-available/eakramar.ru.conf /etc/nginx/sites-enabled/`
+4. Отключи дефолтный: `sudo rm /etc/nginx/sites-enabled/default`
+5. Проверь синтаксис (**обязательно перед reload!**): `sudo nginx -t`
+6. Перечитай конфиг: `sudo systemctl reload nginx`
+7. Проверь: `curl -v -H "Host: eakramar.ru" http://IP-твоего-сервера/`
+
+**Что записать в `notes/unit-04-nginx-https.md`:**
+- Зачем в nginx разделили `sites-available/` и `sites-enabled/`? (Это конвенция Debian/Ubuntu, не самого nginx)
+- Что делает `nginx -t` и почему **всегда** запускать перед reload?
+- В чём разница `systemctl reload nginx` vs `systemctl restart nginx`? (Reload — плавно перечитывает конфиг, соединения не рвутся. Restart — рвёт все.)
+- В логах `/var/log/nginx/access.log` найди свой curl-запрос. Какой формат по умолчанию? (combined log format)
+
+**Вопросы для самопроверки:**
+- Что произойдёт если два server block'а слушают один порт с одинаковым server_name?
+- Что произойдёт если нет ни одного server block с `server_name eakramar.ru`, но запрос пришёл с этим Host заголовком? (Ответ: сработает default_server, обычно первый по порядку)
+
+---
+
+### Эксперимент 2 🧠 — HTTPS через Let's Encrypt (HTTP-01 challenge)
+
+**Что делаем:** получаем валидный TLS-сертификат от Let's Encrypt.
+
+**Подготовка:**
+1. Убедись что в Cloudflare A-запись eakramar.ru → IP твоего сервера, режим **DNS only** (серое облачко) — критично для HTTP-01
+2. Проверь: `dig eakramar.ru +short` — должен вернуть IP твоего сервера, не IP Cloudflare (104.x.x.x / 172.x.x.x — это CF)
+3. Открой 80 и 443 порты в firewall провайдера / ufw если он у тебя уже включён
+
+**Команды:**
+```bash
+# Устанавливаем certbot
+sudo apt install certbot python3-certbot-nginx -y
+
+# Получаем сертификат с автоматической правкой nginx-конфига
+sudo certbot --nginx -d eakramar.ru -d www.eakramar.ru
+
+# Certbot задаст вопросы: email (для уведомлений об expiration), согласие с ToS, 
+# хочешь ли редирект HTTP → HTTPS (говори YES)
+
+# Смотрим что сделал certbot с твоим конфигом
+cat /etc/nginx/sites-available/eakramar.ru.conf
+
+# Проверяем сертификаты
+sudo certbot certificates
+
+# Тест автообновления (dry-run — не портит реальный сертификат)
+sudo certbot renew --dry-run
+```
+
+**Что сделать вручную:**
+- Открой https://eakramar.ru в браузере → должен быть зелёный замок
+- Проверь оценку на https://www.ssllabs.com/ssltest/ → должно быть A или A+
+
+**Что записать:**
+- Куда certbot положил сертификаты? (`/etc/letsencrypt/live/eakramar.ru/`)
+- Какие файлы там лежат? Что каждый значит?
+  - `fullchain.pem` — твой сертификат + intermediate certs
+  - `privkey.pem` — приватный ключ (**никому не показывать, никогда не коммитить**)
+  - `cert.pem` — только твой сертификат (обычно не используется)
+  - `chain.pem` — только intermediate (без твоего)
+- Как certbot настроил автообновление? Проверь: `systemctl list-timers | grep certbot`
+- Что делает `--deploy-hook` в конфиге renewal? Найди файл `/etc/letsencrypt/renewal/eakramar.ru.conf`
+
+**Вопросы:**
+- Сертификат LE действителен 90 дней. Когда именно certbot будет пытаться обновить? (за 30 дней до expiration, попытки через systemd timer)
+- Что произойдёт если сертификат **уже истёк** и certbot renew падает? (Браузеры покажут ошибку. Восстановление: устрани причину падения renew, потом `certbot renew --force-renewal`)
+
+**⚠️ Если HTTP-01 не сработал:**
+Переходи на DNS-01 через Cloudflare API (эксперимент 2b).
+
+---
+
+### Эксперимент 2b 🧠 — [опционально] DNS-01 challenge через Cloudflare API
+
+**Когда делать:** если HTTP-01 из эксперимента 2 упал с ошибкой валидации, или хочешь научиться DNS-01 в принципе.
+
+**Что делаем:** получаем сертификат без открытого 80 порта, через DNS-запись.
+
+**Подготовка:**
+1. Создай Cloudflare API токен: **My Profile → API Tokens → Create Token → Edit zone DNS template**. Ограничь скоуп только зоной eakramar.ru
+2. Сохрани токен в файл на сервере с правами 600:
+   ```bash
+   sudo mkdir -p /etc/letsencrypt/secrets
+   sudo tee /etc/letsencrypt/secrets/cloudflare.ini <<EOF
+   dns_cloudflare_api_token = ТВОЙ_ТОКЕН_СЮДА
+   EOF
+   sudo chmod 600 /etc/letsencrypt/secrets/cloudflare.ini
+   ```
+
+**Команды:**
+```bash
+sudo apt install python3-certbot-dns-cloudflare -y
+
+# Получаем сертификат через DNS-01
+sudo certbot certonly \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/letsencrypt/secrets/cloudflare.ini \
+  -d eakramar.ru -d '*.eakramar.ru'
+
+# Обрати внимание: с DNS-01 можешь получить wildcard-сертификат (*.eakramar.ru)!
+# С HTTP-01 wildcard нельзя.
+```
+
+Потом руками правишь конфиг nginx, добавляя пути к сертификату.
+
+**Что записать:**
+- Почему DNS-01 позволяет wildcard, а HTTP-01 — нет? (HTTP-01 доказывает контроль над **конкретным именем**, DNS-01 — контроль над **всей зоной**)
+- Какие ещё DNS-провайдеры поддерживает certbot? (`certbot-dns-*` — есть под большинство: Route53, GoDaddy, DigitalOcean, Hetzner и т.д.)
+
+---
+
+### Эксперимент 3 🧠 — Reverse proxy: nginx → приложение
+
+**Что делаем:** поднимаем простое приложение на localhost:3000 и делаем nginx его reverse proxy.
+
+**Простое приложение** (Python встроенный HTTP-сервер, ничего ставить не надо):
+```bash
+# В одном терминале — сервер
+cd /tmp && python3 -m http.server 3000
+
+# Работает? Проверь: curl http://localhost:3000
+```
+
+**Nginx-конфиг для reverse proxy** — добавь в eakramar.ru.conf в HTTPS server-блок:
+```nginx
+location /app/ {
+    proxy_pass http://localhost:3000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Перечитай: `sudo nginx -t && sudo systemctl reload nginx`.
+Проверь: `curl https://eakramar.ru/app/` — должен вернуть содержимое `/tmp` (то что отдаёт Python-сервер).
+
+**Ключевой эксперимент — слеш в proxy_pass:**
+
+Сделай **два разных теста**:
+
+**Тест А:** `proxy_pass http://localhost:3000;` (**без** слеша в конце)
+```bash
+curl -v https://eakramar.ru/app/
+# Смотри access.log Python-сервера — какой path запрашивался?
+```
+
+**Тест Б:** `proxy_pass http://localhost:3000/;` (**со** слешом в конце)
+```bash
+curl -v https://eakramar.ru/app/
+# Опять смотри access.log Python-сервера
+```
+
+**Что должно произойти:**
+- Тест А (без слеша): Python-сервер получит `GET /app/`
+- Тест Б (со слешом): Python-сервер получит `GET /` — префикс `/app/` **обрезан** nginx-ом
+
+Это **классический источник багов** в nginx. Запомни правило: слеш в конце `proxy_pass` = обрезать location prefix.
+
+**Что ещё записать:**
+- Что делают заголовки `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Proto` и зачем их передавать? (Без них backend-приложение будет думать что все запросы идут с 127.0.0.1)
+- Что такое `$host` vs `$server_name` в nginx? (host — то что клиент прислал в Host заголовке; server_name — то что в конфиге)
+
+**Вопросы:**
+- Если приложение на localhost:3000 упало — что покажет nginx клиенту? (502 Bad Gateway)
+- Что покажет если приложение долго не отвечает? (504 Gateway Timeout, по умолчанию 60 секунд)
+
+---
+
+### Эксперимент 4 📺 — gzip, security headers, оценка на SSL Labs
+
+**Что делаем:** доводим сайт до grade A+ на SSL Labs и securityheaders.com.
+
+**Добавь в HTTPS server-блок:**
+```nginx
+# Gzip compression
+gzip on;
+gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+gzip_min_length 1000;
+
+# Security headers
+add_header Strict-Transport-Security "max-age=300" always;
+add_header X-Frame-Options "DENY" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Content-Security-Policy "default-src 'self'" always;
+
+# TLS настройки (если certbot не поставил — добавь)
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_prefer_server_ciphers off;
+```
+
+**Внимание про HSTS:** я специально ставлю `max-age=300` (5 минут) для эксперимента. Это правильная стратегия при первом включении. **Не ставь max-age=31536000 (год) сразу** — если что-то пойдёт не так с сертификатом, все посетители, которые уже "получили" HSTS, не смогут зайти на HTTP-версию, пока не истечёт срок.
+
+**Проверка:**
+```bash
+# gzip работает?
+curl -H "Accept-Encoding: gzip" -I https://eakramar.ru/
+
+# Security headers присутствуют?
+curl -I https://eakramar.ru/
+```
+
+**Онлайн-проверки:**
+- https://www.ssllabs.com/ssltest/ — должно быть A+
+- https://securityheaders.com/ — должно быть минимум B, лучше A
+
+**Что записать:**
+- Какие security headers ты добавил и что каждый делает?
+- Почему `Content-Security-Policy` для реального сайта — сложная штука? (Он режет inline JS, внешние ресурсы. Нужно точно знать что использует твой фронт)
+- Что покажет SSL Labs если у тебя всё хорошо? (Grade A+, оценки Certificate/Protocol/Key Exchange/Cipher Strength)
+
+**Вопросы:**
+- Что такое **HSTS preload**? Стоит ли включать? (Это когда браузер знает что твой домен всегда HTTPS **до первого визита**. Опасно: если однажды захочешь HTTP — забудь. Только когда точно уверен)
+- Почему `always` в `add_header`? (Без always заголовок отдаётся только на 200-ответы. С always — на все, включая 4xx/5xx. Обычно надо always.)
+
+---
+
+### Эксперимент 5 🧠 — Диагностика: сайт не работает, что делать?
+
+**Что делаем:** сознательно ломаем сайт разными способами и учимся диагностировать. Это тренировка "на дежурстве".
+
+**Сценарий А — синтаксическая ошибка в конфиге:**
+```bash
+# Внеси очевидную ошибку — сотри точку с запятой в конце одной строки
+sudo nano /etc/nginx/sites-available/eakramar.ru.conf
+sudo nginx -t
+# Что показывает? Точно указывает файл и строку?
+# Верни точку с запятой на место
+```
+
+**Сценарий Б — порт занят:**
+```bash
+# Что если 80 порт занял кто-то другой? Симулируем:
+sudo systemctl stop nginx
+sudo python3 -m http.server 80 &  # (в фоне, будет держать порт)
+sudo systemctl start nginx  # что произойдёт?
+sudo journalctl -u nginx -n 20
+# Убей python
+sudo kill %1
+sudo systemctl start nginx  # теперь нормально
+```
+
+**Сценарий В — сертификат "истёк":**
+Не будем реально истекать сертификат, но научимся смотреть:
+```bash
+# Когда истекает?
+sudo openssl x509 -in /etc/letsencrypt/live/eakramar.ru/fullchain.pem -noout -dates
+
+# Все детали сертификата
+sudo openssl x509 -in /etc/letsencrypt/live/eakramar.ru/fullchain.pem -noout -text | head -30
+
+# Проверить сертификат снаружи (как видит клиент)
+echo | openssl s_client -connect eakramar.ru:443 -servername eakramar.ru 2>/dev/null | openssl x509 -noout -dates
+```
+
+**Сценарий Г — nginx не отвечает клиенту:**
+Пройди чеклист:
+```bash
+# 1. Слушает ли nginx нужный порт?
+sudo ss -tlnp | grep -E ':(80|443)'
+
+# 2. Синтаксис конфига?
+sudo nginx -t
+
+# 3. Логи nginx?
+sudo tail -20 /var/log/nginx/error.log
+sudo journalctl -u nginx -n 20
+
+# 4. Firewall пропускает?
+sudo ufw status  # если ufw используется
+
+# 5. С другой машины — доходит ли трафик?
+# С локальной машины:
+curl -v https://eakramar.ru/
+telnet eakramar.ru 443  # или ncat -v eakramar.ru 443
+
+# 6. DNS резолвится куда надо?
+dig eakramar.ru +short  # должен быть IP твоего сервера, не CF
+```
+
+**Что записать в раздел "Ключевые выводы для дежурства":**
+- **Не переопределения**, а **действия** в стиле "если Х — сделай Y":
+  - "Сайт не открывается → в первую очередь `nginx -t` + `journalctl -u nginx -n 50`"
+  - "502 Bad Gateway → backend упал, проверь `ss -tlnp | grep :PORT` — слушает ли твой upstream"
+  - "504 Gateway Timeout → backend жив но тормозит, крути `proxy_read_timeout`"
+  - "Сертификат — проверь дату: `openssl x509 -in /path -noout -dates`"
+  - "После правки конфига **всегда** `nginx -t` перед `reload`"
+
+---
+
+### Артефакты для Git
+
+```
+artifacts/unit-04-nginx/
+├── eakramar.ru.conf          # финальный nginx-конфиг для домена (без секретов)
+└── (при желании: демо-приложение)
+
+notes/unit-04-nginx-https.md   # все эксперименты + ключевые выводы для дежурства
+```
+
+**Важно про безопасность:**
+- **НЕ коммить** содержимое `/etc/letsencrypt/live/eakramar.ru/privkey.pem`
+- **НЕ коммить** `cloudflare.ini` с API-токеном
+- В конфиге nginx можно оставить пути к сертификатам — сами файлы там не лежат
 
 ### Тест юнита 4
 
@@ -698,16 +1063,118 @@ notes/unit-03-network-dns.md   # все эксперименты с команд
 3. `proxy_pass http://localhost:3000` vs `proxy_pass http://localhost:3000/` (со слешом).
 4. Как настроить автообновление LE-сертификата, чтобы не забылось?
 5. Сайт работает по HTTP, на HTTPS — connection refused. Что проверять?
+6. **Новый:** отличие HTTP-01 challenge от DNS-01. Когда какой использовать?
 
 <details><summary>Эталонные ответы</summary>
 
-1. (а) TLS termination; (б) load balancing; (в) кэширование; (г) rate limiting/DDoS; (д) compression; (е) единая точка логов и метрик; (ж) host-based routing.
-2. HSTS говорит браузеру ходить только по HTTPS на `max-age` секунд. Риск большого max-age: если сертификат сломается — пользователи не зайдут до истечения. Стратегия: 300с → проверка → год.
-3. **Без слеша**: URI передаётся как есть. `/api/users` → `/api/users`. **Со слешом**: nginx обрезает location prefix. При `location /api/`, `/api/users` → `/users`. Классический баг.
-4. `certbot` ставит cron/timer автоматически. Проверка: `certbot renew --dry-run`. `--deploy-hook 'systemctl reload nginx'`.
-5. (а) `ss -tlnp | grep :443`; (б) `nginx -t`; (в) `journalctl -u nginx`; (г) `ufw status`; (д) `curl -v https://...`; (е) `listen 443 ssl;` в конфиге.
+1. (а) TLS termination (одно место, где живут сертификаты); (б) load balancing (nginx умеет upstream с несколькими backend'ами); (в) кэширование ответов и статики; (г) rate limiting и защита от DDoS/bruteforce; (д) compression (gzip/brotli); (е) единая точка логов и метрик; (ж) host-based / path-based routing на разные приложения; (з) TLS-параметры (протоколы, cipher-suites) — backend не касается.
+
+2. HSTS (Strict-Transport-Security) говорит браузеру ходить только по HTTPS на `max-age` секунд. Записывается в браузер, действует независимо от твоего сервера. **Риск большого max-age:** если сертификат сломается или ты специально захочешь откатиться на HTTP — пользователи не смогут зайти до истечения срока. Стратегия выкатки: max-age=300 → проверка недели → max-age=86400 → месяц → max-age=31536000 (год).
+
+3. **Без слеша:** `proxy_pass http://localhost:3000;` — nginx передаёт URI как есть. Запрос `/app/users` уйдёт как `/app/users`. **Со слешом:** `proxy_pass http://localhost:3000/;` — nginx **обрезает** location prefix. При `location /app/`, запрос `/app/users` уйдёт как `/users`. Классический источник багов.
+
+4. Certbot автоматически ставит systemd timer при установке. Проверить: `systemctl list-timers | grep certbot`. Обязательно тестируй: `certbot renew --dry-run` — должен пройти без ошибок. Для nginx-плагина reload происходит автоматически; для manual — настрой `--deploy-hook 'systemctl reload nginx'`. Renewal-конфиг в `/etc/letsencrypt/renewal/DOMAIN.conf`.
+
+5. По порядку: (а) `ss -tlnp | grep :443` — слушает ли nginx 443; (б) `nginx -t` — синтаксис конфига OK?; (в) `journalctl -u nginx -n 50` — есть ли ошибки в логах systemd; (г) `tail /var/log/nginx/error.log` — nginx-specific ошибки; (д) `ufw status` / firewall провайдера — пропускает 443?; (е) в конфиге есть `listen 443 ssl;`?; (ж) пути к `ssl_certificate` и `ssl_certificate_key` существуют и читаемы nginx-процессом?; (з) с другой машины `curl -v https://...` — доходит ли трафик до порта.
+
+6. **HTTP-01:** LE делает HTTP-запрос к `http://твой-домен/.well-known/acme-challenge/TOKEN`, сервер отдаёт ожидаемый контент. Требования: 80 порт открыт извне, LE-серверы могут достучаться. Плюсы: просто. Минусы: не даёт wildcard-сертификаты; не работает если сервер не доступен извне (private инфра, российский VPS с блокировкой). **DNS-01:** ты (через плагин) создаёшь TXT-запись `_acme-challenge.твой-домен`, LE проверяет DNS. Требования: доступ к DNS через API. Плюсы: работает без открытого сервера, даёт wildcard. Минусы: сложнее настроить (API-токен, credentials-файл). Когда HTTP-01: простой сайт, публичный сервер, не нужен wildcard. Когда DNS-01: private инфра, wildcard-сертификаты, недоступность LE к серверу.
 
 </details>
+
+---
+
+### 📖 Мини-словарь технического английского для юнита 4
+
+Формат тот же что в юните 3: делай Anki-карточки по 5-7 в день из тех слов, которые реально встретишь в man/документации.
+
+#### 🔐 TLS / Сертификаты — специфика
+
+| Английский | Русский | Где встречается |
+|------------|---------|-----------------|
+| **certificate** | сертификат | certbot output |
+| **certificate authority (CA)** | центр сертификации | Let's Encrypt = CA |
+| **issue a certificate** | выдать сертификат | "issuing certificate for..." |
+| **revoke** | отозвать | revoked certificate |
+| **expire / expiration** | истечь / истечение | "certificate will expire" |
+| **renew** | продлить | `certbot renew` |
+| **wildcard certificate** | wildcard-сертификат (`*.domain`) | покрывает все поддомены |
+| **subject** | субъект (кому выдан) | CN=eakramar.ru |
+| **issuer** | издатель (кто выдал) | Let's Encrypt R3 |
+| **chain / chain of trust** | цепочка (доверия) | root → intermediate → leaf |
+| **root certificate** | корневой сертификат | предустановлен в ОС/браузер |
+| **intermediate** | промежуточный | между root и твоим |
+| **leaf certificate** | конечный (твой) сертификат | в конце цепочки |
+| **fingerprint** | отпечаток (хеш серта) | для сверки подлинности |
+| **key exchange** | обмен ключами | часть TLS handshake |
+| **cipher suite** | набор шифров | согласуется в handshake |
+| **forward secrecy** | прямая секретность | свойство современных cipher suites |
+| **SNI (Server Name Indication)** | указание имени сервера в TLS | как один IP держит много доменов |
+
+#### 🔧 Nginx-специфика
+
+| Английский | Русский | Контекст |
+|------------|---------|----------|
+| **server block** | server-блок | секция `server {}` в конфиге |
+| **location block** | location-блок | `location /path/ {}` |
+| **upstream** | апстрим (backend-сервер) | `upstream backend {}` |
+| **reload** | перечитать конфиг | `nginx -s reload` |
+| **restart** | перезапустить (соединения рвутся) | `systemctl restart nginx` |
+| **backend** | бэкенд (твоё приложение) | что стоит за reverse proxy |
+| **origin server** | origin-сервер (реальный, не кэш/CDN) | Cloudflare терминология |
+| **worker process** | рабочий процесс nginx | обычно = кол-во CPU |
+| **directive** | директива (строчка конфига) | `listen`, `server_name` |
+| **prefix match** | совпадение по префиксу | `location /api` |
+| **regex match** | совпадение по регулярке | `location ~ ^/api` |
+| **default_server** | сервер по умолчанию | если нет матча по Host |
+
+#### 🌐 HTTP / веб — общие термины
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **request** | запрос | HTTP request |
+| **response** | ответ | HTTP response |
+| **status code** | код статуса | 200, 404, 502 |
+| **redirect** | редирект (перенаправление) | 301, 302 |
+| **header** | заголовок | HTTP header |
+| **body / payload** | тело ответа | HTML/JSON |
+| **query string** | строка запроса | `?key=value&...` |
+| **user agent** | клиент (браузер) | User-Agent header |
+| **origin** | источник | Origin/Referer headers |
+| **cross-origin** | кросс-доменный | CORS |
+| **preflight** | предзапрос (OPTIONS в CORS) | CORS preflight |
+| **cache-control** | управление кэшем | Cache-Control header |
+| **etag** | тег версии контента | If-None-Match |
+| **compression** | сжатие | gzip, brotli |
+| **rate limiting** | ограничение скорости запросов | защита от DDoS |
+| **throttling** | замедление (rate limiting в мягкой форме) | вместо блокировки — задержка |
+
+#### 🛡️ Безопасность — заголовки
+
+| Английский | Русский | |
+|------------|---------|--|
+| **HSTS (Strict-Transport-Security)** | принудительный HTTPS | max-age в секундах |
+| **CSP (Content Security Policy)** | политика источников контента | режет XSS |
+| **CORS (Cross-Origin Resource Sharing)** | доступ с других доменов | Access-Control-* headers |
+| **X-Frame-Options** | защита от clickjacking | DENY / SAMEORIGIN |
+| **X-Content-Type-Options** | запрет угадывания MIME | nosniff |
+| **Referrer-Policy** | политика передачи Referer | strict-origin-when-cross-origin |
+| **XSS (Cross-Site Scripting)** | межсайтовый скриптинг | атака |
+| **CSRF (Cross-Site Request Forgery)** | подделка межсайтовых запросов | атака |
+| **MITM (Man-In-The-Middle)** | атака "человек посередине" | TLS защищает |
+
+#### Готовые 10 Anki-карточек на старт
+
+1. `certificate expires in 90 days` → сертификат истекает через 90 дней (Let's Encrypt default)
+2. `certificate chain of trust` → цепочка доверия (root → intermediate → leaf)
+3. `reload nginx` → перечитать конфиг без разрыва соединений
+4. `502 Bad Gateway` → upstream/backend не отвечает или упал
+5. `504 Gateway Timeout` → backend жив, но не отвечает за timeout
+6. `SNI (Server Name Indication)` → как один IP отдаёт разные сертификаты
+7. `wildcard certificate` → сертификат для `*.domain` (только через DNS-01)
+8. `HSTS max-age` → сколько секунд браузер помнит "только HTTPS"
+9. `to issue a certificate` → выдать сертификат
+10. `to renew a certificate` → продлить сертификат
+
 
 ---
 
