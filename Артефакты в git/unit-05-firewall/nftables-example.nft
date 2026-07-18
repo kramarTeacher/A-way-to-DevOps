@@ -1,0 +1,9 @@
+root@hardening:/home/eakramar# nft list table inet myfilter
+table inet myfilter {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state established,related accept
+		tcp dport 22 accept
+	}
+}

@@ -84,7 +84,13 @@
 | 2    | 12.07           | 3      |55  мин | с 15:00 по 17:00 anki-карточки (прошел 9 штук)                                                                           |
 | 2    | 13.07           | 3      |239 мин | с 08:25 по 12:24  теория матчинг в nginx, эксперимент 3, 4, 5                                                            |
 | 2    | 14.07           | 3      |174 мин | с 09:06 по 12:00  эксперимент 5, тест, подготовка отчета о юните, создание карточек anki                                 |
+| 2    | 15.07           | 4      |196 мин | с 08:35 по 11:51 ознакомление с 5 юнитом, теория тnetfilter, nftables, ufw, Connection tracking                          |
+| 2    | 15.07           | 4      |60  мин | с 18:00 по 19:00 эксперимент 1                                                                                           |
+| 2    | 16.07           | 4      |285 мин | с 09:11 по 13:56 эксперимент 1, 2, 3, 4; теория hardening Ubuntu; bash скрипт hardening Ubuntu                           |
+| 2    | 17.07           | 4      |213 мин | с 08:57 по 12:30 эксперимент 4, 5; bash скрипт hardening Ubuntu; генерирование и созадние anki карточек                  |
+| 2    | 18.07           | 4      |73  мин | с 09:04 по 10:17 генерирование и созадние anki карточек; тест; Ubuntu Server Guide → Security → Firewall; отчет          |
 | ...  |                 |        |        |                                                                                                                          |
+| 2    | 02.08 → 16.08   |        |        | Отпуск — если есть силы                                                                                                  |
 
 **Анализ раз в 60 дней (конец цикла):**
 - 4-5 юнитов → шёл в ускоренном, можно держать темп
@@ -1189,39 +1195,485 @@ notes/unit-04-nginx-https.md   # все эксперименты + ключев�
 
 ---
 
-## Юнит 5 📺 — Firewall, hardening
+## Юнит 5 📺/🧠 — Firewall, hardening
 
-**Тип нагрузки:** относительно лёгкий, можно вечером
+**Тип нагрузки:** смешанный
+- 📺 iptables/nftables/ufw концепции — можно вечером
+- 🧠 Практика с реальными правилами и hardening — свежая голова
+- 🔁 Английский словарь — для Anki
 
-**Теория (3ч):** 📺
-- [ ] iptables vs nftables vs ufw
-- [ ] Базовый hardening Ubuntu
+**Контекст по моему бэкграунду:**
+- Много лет админ, работал с firewall на MikroTik — концептуально знаю: цепочки правил, chain=input/forward, connection tracking
+- Nftables под капотом RouterOS-x86 — видел
+- Ubuntu ufw руками писал реже — тут фокус
+- fail2ban — знаю что делает, руками не настраивал
 
-**Практика (4ч):**
-- [ ] ufw: только SSH-порт, 80, 443
-- [ ] fail2ban для SSH
-- [ ] unattended-upgrades
-- [ ] Чек-лист "Initial server setup" в Git
+### Теория (2-3ч) 📺
 
-**Артефакт:** чек-лист + конфиги fail2ban
+- [x] iptables vs nftables vs ufw — что под капотом, что где использовать в 2026
+- [x] Netfilter framework — что это, где хуки в сетевом стеке ядра
+- [x] Connection tracking (conntrack) — как firewall помнит соединения
+- [x] Базовый hardening Ubuntu — 8-10 обязательных пунктов
+
+**Рекомендую:**
+- [x] Ubuntu Server Guide → Security → Firewall
+- [-] `man ufw`, `man nft` — читай на английском, словарь ниже
+- [x] Видео "Netfilter and iptables explained" — любой канал, 15 мин
+
+---
+
+### Эксперимент 1 📺 — Что такое netfilter и куда попадают пакеты
+
+**Что делаем:** увидеть цепочки правил и понять как пакет проходит через firewall.
+
+**Команды:**
+```bash
+# Что сейчас в netfilter (можно на свежей системе — увидеть базу)
+sudo iptables -L -v -n --line-numbers
+sudo iptables -t nat -L -v -n
+
+# Или для nftables (современнее)
+sudo nft list ruleset
+
+# Показать текущие соединения через conntrack
+sudo apt install conntrack -y
+sudo conntrack -L | head -20
+
+# Статистика conntrack: сколько соединений сейчас, максимум
+sudo conntrack -C
+cat /proc/sys/net/netfilter/nf_conntrack_max
+```
+
+**Что записать в `notes/unit-05-firewall-hardening.md`:**
+- Какие цепочки видишь? (обычно INPUT, FORWARD, OUTPUT в filter table)
+- Что делает каждая цепочка? INPUT — трафик к серверу, FORWARD — транзит, OUTPUT — от сервера наружу
+- Что такое таблица (table)? Табл filter, nat, mangle, raw — зачем каждая
+- Проходит ли пакет через все цепочки? Нет — путь зависит от типа
+
+**Вопросы для самопроверки:**
+- Пакет пришёл на порт 443 nginx → через какую цепочку проходит?
+- Пакет от nginx уходит к клиенту → через какую цепочку?
+- Пакет транзитом через сервер (роутинг) → через какую цепочку?
+
+---
+
+### Эксперимент 2 🧠 — ufw с нуля: правильный порядок команд
+
+**⚠️ ВАЖНО перед началом:** если делаешь на удалённом сервере — **держи открытой вторую SSH-сессию**. Если ошибёшься с портом — потеряешь доступ, придётся идти в web-консоль провайдера.
+
+**Что делаем:** настраиваем ufw пошагово, наблюдаем что происходит на каждом шаге.
+
+**Команды:**
+```bash
+# Начинаем с чистого листа
+sudo ufw status  # inactive?
+
+# Смотрим дефолтные политики (важно понять до включения!)
+sudo ufw status verbose
+
+# ЛЮБОЙ ДРУГОЙ КОМАНДЕ ДОЛЖНО ПРЕДШЕСТВОВАТЬ ЭТО:
+sudo ufw allow 22/tcp
+# ↑ или свой SSH-порт если ты его менял
+# Без этого следующая команда потеряет доступ!
+
+# Разрешаем стандартные веб-порты
+sudo ufw allow 80/tcp comment 'HTTP'
+sudo ufw allow 443/tcp comment 'HTTPS'
+
+# Смотрим что накопили ДО применения
+sudo ufw show added
+
+# Только теперь можно включать
+sudo ufw enable
+# ufw предупредит: "Command may disrupt existing ssh connections" — Yes
+
+# Проверяем что получилось
+sudo ufw status verbose
+sudo ufw status numbered  # с номерами правил — для delete
+
+# Что делает ufw под капотом? Смотрим сгенерированные iptables/nftables правила
+sudo iptables -L -v -n | head -30
+# Или для новых Ubuntu (backend=nftables):
+sudo nft list ruleset | head -50
+```
+
+**Что записать:**
+- Дефолтные политики ufw: incoming DENY, outgoing ALLOW, forward DENY. Почему такая логика?
+- Что случится если я забуду allow 22 перед enable? (потеря SSH-доступа)
+- Разница `ufw allow 22` vs `ufw allow 22/tcp` (первая — и TCP и UDP; вторая — только TCP)
+- Что делает флаг `comment` — сохраняет читаемое описание в выводе status
+
+**Вопросы:**
+- Как удалить конкретное правило? (`sudo ufw status numbered` → `sudo ufw delete N`)
+- Как заблокировать конкретный IP? (`sudo ufw deny from 1.2.3.4`)
+- Как разрешить SSH только с одного IP? (`sudo ufw allow from 1.2.3.4 to any port 22`)
+- Что делает `sudo ufw reset`? (сбрасывает всё в дефолт — использовать с осторожностью)
+
+---
+
+### Эксперимент 3 🧠 — fail2ban для SSH
+
+**Что делаем:** ставим fail2ban, настраиваем защиту от bruteforce, проверяем что работает.
+
+**Команды:**
+```bash
+# Установка
+sudo apt install fail2ban -y
+
+# Проверяем что установился и запущен
+sudo systemctl status fail2ban
+sudo fail2ban-client status
+
+# По умолчанию fail2ban защищает только SSH (jail sshd)
+sudo fail2ban-client status sshd
+```
+
+**Настройка через jail.local (ВАЖНО: не править jail.conf!):**
+```bash
+# Копируем дефолт в jail.local — свою кастомизацию
+sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+# Или чище — сразу создать пустой jail.local только со своими секциями
+```
+
+Открой `/etc/fail2ban/jail.local` и найди/добавь секцию `[sshd]`:
+```ini
+[DEFAULT]
+# Как долго держать бан (в секундах). -1 = навсегда
+bantime  = 1h
+# За какое окно считать попытки
+findtime = 10m
+# Сколько неудачных попыток до бана
+maxretry = 5
+# Не банить свой домашний IP (если знаешь свой публичный)
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+port    = 22
+# Если менял SSH-порт — указать здесь
+# port    = 22022
+```
+
+Применяем:
+```bash
+sudo systemctl reload fail2ban
+sudo fail2ban-client status sshd
+```
+
+**Тест что работает (симулируем bruteforce):**
+```bash
+# С другой машины — специально ошибись паролем 5 раз
+ssh nonexistent-user@твой-сервер
+# (введи неверный пароль)
+# Повторить 5 раз
+
+# На сервере смотрим:
+sudo fail2ban-client status sshd
+# Increase in "Currently banned" — работает
+
+# Смотрим детально
+sudo iptables -L f2b-sshd -n
+# Увидишь IP атакующего
+```
+
+**Разбан себя если что:**
+```bash
+sudo fail2ban-client set sshd unbanip 1.2.3.4
+```
+
+**Что записать:**
+- Разница между jail.conf и jail.local (jail.conf перезаписывается при обновлении пакета, jail.local — нет)
+- Что такое DEFAULT секция — применяется ко всем jails если не переопределено
+- Как fail2ban технически банит? (добавляет iptables/nftables правила через action)
+
+**Вопросы:**
+- Что произойдёт если я ошибусь паролем 5 раз со своего домашнего IP? (ban на 1 час, если не в ignoreip)
+- Как посмотреть все забаненные IP через все jails? (`sudo fail2ban-client banned`)
+- Fail2ban читает какие логи для SSH? (`/var/log/auth.log` — журнал sudo/ssh/pam)
+
+---
+
+### Эксперимент 4 🧠 — Hardening: обязательный чек-лист сервера
+
+**Что делаем:** проходим по чек-листу, проверяем каждый пункт на своей виртуалке. Каждый пункт — тест.
+
+**1. SSH — только ключи, no password**
+```bash
+# В /etc/ssh/sshd_config:
+# PasswordAuthentication no
+# PermitRootLogin no  (или prohibit-password если нужен root по ключу)
+# PubkeyAuthentication yes
+sudo sshd -t  # проверка синтаксиса
+sudo systemctl reload sshd
+```
+Проверка: `ssh -o PubkeyAuthentication=no user@server` → должен отказать.
+
+**2. Non-root user with sudo**
+Проверка: `id evgeniy` — есть в группе sudo? `sudo -l` — что разрешено?
+
+**3. Automatic security updates (unattended-upgrades)**
+```bash
+sudo apt install unattended-upgrades -y
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# Проверка конфига
+cat /etc/apt/apt.conf.d/50unattended-upgrades | grep -A1 "Allowed-Origins"
+cat /etc/apt/apt.conf.d/20auto-upgrades
+
+# Форс-запуск для теста
+sudo unattended-upgrade -d --dry-run 2>&1 | tail -20
+```
+
+**4. UFW настроен (эксперимент 2)**
+Проверка: `sudo ufw status verbose` — active, минимум портов.
+
+**5. Fail2ban настроен (эксперимент 3)**
+Проверка: `sudo fail2ban-client status sshd` — enabled.
+
+**6. Отключены неиспользуемые сервисы**
+```bash
+# Что вообще слушает наружу?
+sudo ss -tlnp | grep -v '127\.0\.0\.1\|::1'
+# Если видишь что-то незнакомое — разбираться
+# Классические кандидаты на отключение: rpcbind, avahi-daemon, cups
+sudo systemctl disable --now avahi-daemon 2>/dev/null || true
+```
+
+**7. SSH-порт возможно поменян (защита от ботов, не от целевой атаки)**
+```bash
+# Опционально — я лично считаю необязательным
+# Если делать — не забыть открыть ufw на новом порту
+sudo ufw allow 22022/tcp
+# И только потом менять в sshd_config
+```
+
+**8. /etc в git (простой аудит изменений)**
+```bash
+sudo apt install etckeeper -y
+# Автоматически хранит /etc в git, коммит при apt install/upgrade
+```
+
+**9. Проверка целостности пакетов (опционально)**
+```bash
+sudo apt install debsums -y
+sudo debsums -s  # покажет изменённые файлы пакетов
+```
+
+**10. Разумные ограничения по ресурсам (fork bomb protection)**
+```bash
+# /etc/security/limits.conf
+# * hard nproc 4096
+# * hard nofile 65535
+```
+
+**Что записать в артефакт:** `initial-server-hardening.sh` — bash-скрипт (даже если не идемпотентный пока), который применяет пункты 1-8. В юните 6 сделаешь его идемпотентным.
+
+**Вопросы:**
+- Зачем менять SSH-порт если fail2ban всё равно защищает?
+- Что произойдёт если unattended-upgrades накатит критическое обновление ядра?
+- В чём отличие `PermitRootLogin no` от `PermitRootLogin prohibit-password`?
+
+---
+
+### Эксперимент 5 📺 — nftables руками (для понимания что под ufw)
+
+**Что делаем:** пишем пару правил напрямую на nftables — чтобы понимать что ufw делает под капотом.
+
+**Команды:**
+```bash
+# ВНИМАНИЕ: если у тебя работает ufw — сначала разберись как временно отключить
+# Или делай это на отдельной виртуалке!
+
+# Посмотреть текущий ruleset (если ufw включён — увидишь его правила)
+sudo nft list ruleset
+
+# Создать свою таблицу и цепочку с нуля (пример)
+sudo nft add table inet myfilter
+sudo nft add chain inet myfilter input { type filter hook input priority 0 \; policy drop \; }
+
+# Разрешить loopback
+sudo nft add rule inet myfilter input iif lo accept
+
+# Разрешить established соединения (иначе даже curl отвалится)
+sudo nft add rule inet myfilter input ct state established,related accept
+
+# Разрешить SSH
+sudo nft add rule inet myfilter input tcp dport 22 accept
+
+# Смотрим что получилось
+sudo nft list table inet myfilter
+
+# Убрать всё (не забудь если экспериментировал!)
+sudo nft delete table inet myfilter
+```
+
+**Что записать:**
+- Что такое `table inet` (dual-stack, IPv4+IPv6 в одной таблице)
+- Что такое `hook input priority 0` (куда в netfilter-цепочке вклиниться)
+- Что такое `ct state established,related` (пропускать пакеты уже установленных соединений — это ключ понимания как stateful firewall работает)
+
+**Вопросы:**
+- Почему без правила про established connections curl не работает даже если SSH разрешён?
+- Что произойдёт с активной SSH-сессией если я поставлю policy drop без соответствующего правила?
+- В чём принципиальная разница nftables и iptables? (единый инструмент nft, атомарные апдейты, поддержка dual-stack, сокращённый синтаксис)
+
+---
+
+### Артефакты для Git
+
+```
+artifacts/unit-05-firewall/
+├── initial-server-hardening.sh    # чек-лист скриптом (сделать в юните 6 идемпотентным)
+├── ufw-rules.txt                   # моя итоговая конфигурация ufw
+├── jail.local                      # fail2ban настройки
+└── nftables-example.nft            # пример руками написанной nftables-таблицы
+
+notes/unit-05-firewall-hardening.md  # 5 экспериментов + ключевые выводы
+```
 
 ### Тест юнита 5
 
-1. Команда: какие IP сейчас забанены fail2ban?
+1. Команда: какие IP сейчас забанены fail2ban? (для всех jails и для конкретного sshd)
 2. ufw vs iptables vs nftables — что под капотом, что выбрать в 2026?
-3. Что произойдёт, если включить ufw без `ufw allow 22`?
-4. SSH bastion/jump host — зачем, схема.
-5. 5 правил hardening Ubuntu по умолчанию.
+3. Что произойдёт если включить ufw без предварительного `ufw allow 22`? Как исправить если это случилось?
+4. SSH bastion / jump host — зачем нужен, нарисуй схему словами (клиент → bastion → внутренний сервер)
+5. Назови 5 обязательных правил hardening Ubuntu-сервера с обоснованием каждого.
+6. **Новый:** зачем в firewall правило `ct state established,related accept`?
 
 <details><summary>Эталонные ответы</summary>
 
-1. `fail2ban-client status sshd`. Или `iptables -L f2b-sshd -n`.
-2. iptables — старый user-space к netfilter. nftables — новый, заменяет iptables. ufw — обёртка. 2026: ufw для простых случаев, nftables напрямую для сложных.
-3. **Потеряешь SSH-доступ.** Порядок: `ufw allow 22` → `ufw enable`. Имей под рукой web-консоль.
-4. Bastion — единственный сервер, доступный из интернета по SSH. Остальные — только из private. `ssh -J bastion target`.
-5. (1) SSH key only; (2) non-root user with sudo; (3) ufw минимум портов; (4) fail2ban; (5) unattended-upgrades; (6) поменян SSH-порт; (7) отключены неиспользуемые сервисы.
+1. Все jails: `sudo fail2ban-client banned`. Конкретный jail: `sudo fail2ban-client status sshd`. На уровне netfilter: `sudo iptables -L f2b-sshd -n` (или `sudo nft list ruleset | grep f2b`).
+
+2. **iptables** — user-space инструмент к netfilter, старый (2001-2020). Синтаксис громоздкий, отдельные команды для IPv4/IPv6. **nftables** — новый (с 2014, дефолт в новых дистрибутивах), единый синтаксис для v4/v6/ARP/bridge, атомарные апдейты, встроенные наборы (sets). **ufw** — обёртка над обоими (на новой Ubuntu использует nftables backend). **В 2026:** для простых серверов — ufw. Для сложных правил — nftables напрямую. Iptables — только legacy.
+
+3. **Потеряешь SSH-доступ.** ufw по умолчанию блокирует incoming (default deny incoming). Исправление: (а) заходить через web-консоль провайдера; (б) `sudo ufw disable` или добавить `ufw allow 22`. **Правильный порядок:** allow 22 → enable, никак не наоборот.
+
+4. Bastion — единственный сервер, доступный из интернета по SSH. Все остальные серверы — только из private-сети. Клиент → bastion (публичный, ужесточённый: 2FA, ключи, аудит) → внутренний сервер (недоступен из интернета вообще). Команда: `ssh -J bastion internal-server` (или ProxyJump в `~/.ssh/config`). Плюсы: единая точка входа = единая точка аудита, MFA/2FA настраиваешь один раз, все остальные серверы выпадают из public surface атаки.
+
+5. (1) **SSH только ключи** — пароли брутфорсятся, ключи практически нет. (2) **Non-root user + sudo** — root SSH-логин это тупик логирования (не видно кто именно). (3) **UFW минимум портов** — что не открыто, то нельзя атаковать. (4) **Fail2ban** — динамическая защита от медленных bruteforce. (5) **Unattended-upgrades security** — критические CVE закрываются автоматически. (Дополнительно: 6) поменять SSH-порт — резко снижает шум в логах от ботов; 7) отключить неиспользуемые сервисы; 8) /etc в git через etckeeper для аудита.
+
+6. Firewall без conntrack — stateless. Каждый пакет рассматривается изолированно. Проблема: ты открыл ssh → server сгенерировал ответный пакет → сервер отправил → но у клиента (например браузера) исходящий порт случайный (55000+). Если правило только "разрешить входящий на 22" — ответы клиента не пройдут. `ct state established,related accept` говорит: "пропускать пакеты которые часть уже установленного соединения". Это ключ работы stateful firewall.
 
 </details>
+
+### Anki-карточки для юнита 5 (создавай по ходу)
+
+- "Дефолтная политика ufw для incoming?" → deny
+- "Правильный порядок команд ufw?" → allow rules → enable (наоборот = потеря доступа)
+- "Как посмотреть забаненные IP fail2ban?" → sudo fail2ban-client status sshd
+- "Разница jail.conf vs jail.local?" → jail.conf перезаписывается при обновлении пакета, свои настройки — в jail.local
+- "Что такое conntrack?" → connection tracking — механизм stateful firewall, помнит статус каждого соединения
+- "Что делает ct state established,related accept?" → пропускает пакеты уже установленных TCP-соединений (иначе ответы не пройдут)
+- "Куда fail2ban смотрит для SSH?" → /var/log/auth.log
+- "PermitRootLogin no vs prohibit-password?" → no — полный запрет root SSH; prohibit-password — root только по ключам, не по паролю
+- "Что такое netfilter?" → framework в ядре Linux для обработки сетевых пакетов; iptables/nftables — user-space инструменты к нему
+- "table inet в nftables?" → dual-stack, IPv4 и IPv6 в одной таблице
+
+---
+
+### 📖 Мини-словарь технического английского для юнита 5
+
+Формат тот же что в юнитах 3-4. Создавай Anki-карточки по 5-7 в день из тех слов что встретишь в man/документации.
+
+#### 🛡️ Firewall — базовые термины
+
+| Английский | Русский | Где встречается |
+|------------|---------|-----------------|
+| **firewall** | межсетевой экран, файервол | везде |
+| **rule** | правило | ufw allow ..., iptables -A |
+| **ruleset** | набор правил | nft list ruleset |
+| **chain** | цепочка | INPUT, OUTPUT, FORWARD |
+| **table** | таблица | filter, nat, mangle |
+| **hook** | точка вклинивания в стек ядра | nftables hook input |
+| **priority** | приоритет цепочки | hook input priority 0 |
+| **policy** | политика по умолчанию | policy drop / accept |
+| **drop** | молча отбросить пакет | без ответа отправителю |
+| **reject** | отклонить с ошибкой | отправить ICMP unreachable |
+| **accept** | принять пакет | пропустить дальше |
+| **allow** | разрешить (ufw синтаксис) | ufw allow 22 |
+| **deny** | запретить (ufw синтаксис) | ufw deny from 1.2.3.4 |
+| **incoming** | входящий (трафик) | ufw default deny incoming |
+| **outgoing** | исходящий | ufw default allow outgoing |
+| **forward** | транзитный (через сервер) | forward chain |
+
+#### 🔒 Hardening / Security
+
+| Английский | Русский | Контекст |
+|------------|---------|----------|
+| **harden / hardening** | ужесточение (безопасности) | server hardening |
+| **attack surface** | поверхность атаки | что доступно снаружи |
+| **exposure** | подверженность (уязвимости) | reduce exposure |
+| **vulnerability (CVE)** | уязвимость | Common Vulnerabilities and Exposures |
+| **exploit** | эксплойт / эксплуатировать | to exploit a vulnerability |
+| **compromised** | скомпрометированный | compromised server |
+| **breach** | взлом, нарушение безопасности | data breach |
+| **brute force** | брутфорс — перебор паролей | fail2ban защищает от brute force |
+| **credentials** | учётные данные (логин+пароль) | leaked credentials |
+| **privileges** | привилегии, права | privilege escalation |
+| **root** | суперпользователь | root access |
+| **least privilege** | принцип минимальных привилегий | give minimum needed access |
+| **whitelist / allowlist** | белый список | разрешить только эти IP |
+| **blacklist / blocklist** | чёрный список | заблокировать эти IP |
+
+#### 🚫 fail2ban / bruteforce
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **jail** | "тюрьма" — набор правил в fail2ban | jail sshd |
+| **ban** | забанить | fail2ban-client set jail banip |
+| **unban** | разбанить | fail2ban-client set jail unbanip |
+| **findtime** | окно времени для подсчёта попыток | 10m |
+| **bantime** | как долго держать бан | 1h |
+| **maxretry** | максимум попыток до бана | 5 |
+| **filter** | фильтр логов (regex для fail2ban) | filter = sshd |
+| **action** | что делать когда матч (какие правила firewall добавить) | action = iptables |
+| **jail.conf** | дефолтный конфиг (не править!) | будет перезаписан при apt upgrade |
+| **jail.local** | твой конфиг (перекрывает jail.conf) | тут всё что кастомизируешь |
+
+#### 🔧 SSH-специфика
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **passphrase** | парольная фраза (для ключа) | защита приватного ключа на диске |
+| **key pair** | пара ключей | публичный + приватный |
+| **public key** | публичный ключ | ложится на серверы в authorized_keys |
+| **private key** | приватный ключ | остаётся на клиенте |
+| **fingerprint** | отпечаток ключа | SHA256:xxx для проверки |
+| **known_hosts** | список известных серверов | ~/.ssh/known_hosts |
+| **authorized_keys** | список публичных ключей клиентов | ~/.ssh/authorized_keys на сервере |
+| **jump host / bastion** | сервер-посредник для SSH | ssh -J bastion target |
+| **agent forwarding** | проброс SSH-агента | -A флаг, использовать с осторожностью |
+| **port forwarding** | проброс порта | -L / -R флаги |
+
+#### 🌐 Netfilter / iptables / nftables специфика
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **netfilter** | framework в ядре Linux | база для iptables/nftables |
+| **stateful** | с сохранением состояния (соединений) | stateful firewall |
+| **stateless** | без сохранения состояния | каждый пакет отдельно |
+| **connection tracking (conntrack)** | отслеживание соединений | ядро помнит состояние TCP |
+| **established** | установленное (соединение) | ct state established |
+| **related** | связанное (например, ICMP-ответ на TCP) | ct state related |
+| **new** | новое соединение | первый SYN-пакет |
+| **invalid** | некорректное (мусор) | обычно drop |
+| **NAT (Network Address Translation)** | трансляция сетевых адресов | подмена IP/порта |
+| **SNAT** | source NAT | подмена source IP (обычно outgoing) |
+| **DNAT** | destination NAT | подмена destination IP (port forwarding) |
+| **masquerade** | маскарадинг (SNAT для динамического IP) | обычно для outgoing NAT на роутере |
+
+#### Готовые 10 Anki-карточек на старт
+
+1. `firewall drop vs reject` → drop молча отбрасывает, reject отправляет ICMP unreachable
+2. `default deny incoming` → политика по умолчанию — блокировать входящие; надо явно allow'ить нужные
+3. `stateful firewall` → помнит состояние TCP-соединений; ответы на установленные соединения проходят
+4. `attack surface` → поверхность атаки: что доступно снаружи
+5. `principle of least privilege` → давать минимум прав нужных для работы
+6. `to harden a server` → ужесточить безопасность сервера
+7. `brute force attack` → атака перебора паролей
+8. `to ban / to unban an IP` → забанить / разбанить IP
+9. `bastion / jump host` → сервер-посредник для доступа во внутреннюю сеть
+10. `connection tracking (conntrack)` → отслеживание состояния сетевых соединений
 
 ---
 
