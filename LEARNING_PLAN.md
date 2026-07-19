@@ -89,6 +89,7 @@
 | 2    | 16.07           | 4      |285 мин | с 09:11 по 13:56 эксперимент 1, 2, 3, 4; теория hardening Ubuntu; bash скрипт hardening Ubuntu                           |
 | 2    | 17.07           | 4      |213 мин | с 08:57 по 12:30 эксперимент 4, 5; bash скрипт hardening Ubuntu; генерирование и созадние anki карточек                  |
 | 2    | 18.07           | 4      |73  мин | с 09:04 по 10:17 генерирование и созадние anki карточек; тест; Ubuntu Server Guide → Security → Firewall; отчет          |
+| 2    | 19.07           | 4      |46  мин | с 10:44 по 11:30 работа над ошибками                                                                                     |
 | ...  |                 |        |        |                                                                                                                          |
 | 2    | 02.08 → 16.08   |        |        | Отпуск — если есть силы                                                                                                  |
 
@@ -1679,18 +1680,522 @@ notes/unit-05-firewall-hardening.md  # 5 экспериментов + ключе
 
 ## Юнит 6 🧠 — Bash скриптинг
 
-**Тип нагрузки:** свежая голова — пишем серьёзный скрипт
+**Тип нагрузки:** свежая голова — глубокая работа с текстом кода, нужна концентрация.
 
-**Теория (2ч):** 📺
-- [ ] "Bash Guide for Beginners" (TLDP)
-- [ ] ShellCheck
+**Контекст по моему бэкграунду:**
+- Уже написал `initial-server-hardening.sh` (~350 строк, юнит 5) — реально серьёзный скрипт с идемпотентностью, логами, откатом при ошибке
+- ShellCheck без предупреждений — базовая гигиена есть
+- Что **точно** знаю: `set -euo pipefail`, `if-then-else`, функции, sed для замены строк, trap, exec > >(tee...), heredoc (`cat <<EOF`)
+- Что **скорее всего дырка**: `getopts` / argument parsing, регулярки в bash (`[[ $x =~ ... ]]`), массивы, `mapfile`, `xargs`, subshells vs process substitution, DEBUG/RETURN traps
 
-**Практика (5ч):** 🧠
-- [ ] `server-init.sh`, автоматизирующий юниты 1-5
-- [ ] Аргументы, `set -euo pipefail`, логирование, **идемпотентность**
-- [ ] ShellCheck — 0 warnings
+**Цель юнита:** не изучение bash с нуля, а **полировка существующего скрипта до production-level**. К концу юнита `initial-server-hardening.sh` должен превратиться в `server-init.sh` — универсальный, с proper argument parsing, накоплением статуса, unit-тестами через bats.
 
-**Артефакт:** `server-init.sh` в Git, работает на свежем VPS
+### Теория (2ч) 📺
+
+- [ ] "Bash Guide for Beginners" (TLDP) — главы 7 (условия), 9 (циклы), 10 (функции), 12 (traps)
+- [ ] Google Shell Style Guide → `google.github.io/styleguide/shellguide.html`
+- [ ] `man bash` → секции `SHELL GRAMMAR`, `EXPANSION`, `Parameter Expansion`
+- [ ] Видео "Bash Scripting Full Course 3 Hours" — можно 1.5x, только про то что не знаешь
+
+**Рекомендую в закладки навсегда:**
+- Bash cheatsheet: `github.com/LeCoupa/awesome-cheatsheets/blob/master/languages/bash.sh`
+- ShellCheck wiki: `shellcheck.net/wiki/` — расшифровка кодов SCxxxx
+- ExplainShell: `explainshell.com` — вставляешь команду, получаешь разбор флагов
+
+---
+
+### Эксперимент 1 🧠 — Argument parsing через getopts
+
+**Что делаем:** переделываем аргументы `initial-server-hardening.sh` на `getopts`, чтобы поддерживать флаги, а не только позиционные аргументы.
+
+**Проблема текущей версии:**
+```bash
+sudo ./initial-server-hardening.sh evgeniy
+```
+Что если захочу указать **не только пользователя**, но и:
+- Другой SSH-порт (`-p 22022`)
+- Пропустить установку auditd (`--skip-audit`)
+- Dry-run режим (`-n` / `--dry-run`)
+- Verbose (`-v`)
+
+**Команды и код для практики:**
+
+Создай тестовый скрипт `argparse-test.sh`:
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Дефолтные значения
+USERNAME=""
+SSH_PORT="22"
+SKIP_AUDIT=0
+DRY_RUN=0
+VERBOSE=0
+
+usage() {
+    cat <<EOF
+Использование: $0 -u USERNAME [опции]
+
+Обязательные:
+  -u USERNAME     имя пользователя
+
+Опции:
+  -p PORT         SSH-порт (по умолчанию 22)
+  -s              пропустить установку auditd
+  -n              dry-run (только показать что было бы сделано)
+  -v              verbose
+  -h              эта справка
+
+Примеры:
+  $0 -u evgeniy
+  $0 -u evgeniy -p 22022 -s
+  $0 -u evgeniy -n -v
+EOF
+    exit 0
+}
+
+# Обработка флагов
+while getopts ":u:p:snvh" opt; do
+    case "$opt" in
+        u) USERNAME="$OPTARG" ;;
+        p) SSH_PORT="$OPTARG" ;;
+        s) SKIP_AUDIT=1 ;;
+        n) DRY_RUN=1 ;;
+        v) VERBOSE=1 ;;
+        h) usage ;;
+        :) echo "Ошибка: флаг -$OPTARG требует значение" >&2; exit 1 ;;
+        \?) echo "Ошибка: неизвестный флаг -$OPTARG" >&2; usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# Валидация
+if [[ -z "$USERNAME" ]]; then
+    echo "Ошибка: не указан пользователь (-u)" >&2
+    usage
+fi
+
+if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+    echo "Ошибка: SSH_PORT должен быть числом от 1 до 65535" >&2
+    exit 1
+fi
+
+# Вывод результата
+echo "USERNAME:   $USERNAME"
+echo "SSH_PORT:   $SSH_PORT"
+echo "SKIP_AUDIT: $SKIP_AUDIT"
+echo "DRY_RUN:    $DRY_RUN"
+echo "VERBOSE:    $VERBOSE"
+```
+
+**Тесты для проверки:**
+```bash
+chmod +x argparse-test.sh
+
+# Ошибка: без обязательного -u
+./argparse-test.sh
+
+# Показ справки
+./argparse-test.sh -h
+
+# Обычный вызов
+./argparse-test.sh -u evgeniy
+
+# С опциями
+./argparse-test.sh -u evgeniy -p 22022 -s -v
+
+# Неправильный порт (валидация)
+./argparse-test.sh -u evgeniy -p 99999
+./argparse-test.sh -u evgeniy -p abc
+
+# Неизвестный флаг
+./argparse-test.sh -u evgeniy -x
+```
+
+**Что записать в `notes/unit-06-bash.md`:**
+- Что такое `getopts` встроенная (не путать с внешней `getopt`)
+- Что делает `OPTARG`, `OPTIND`, зачем `shift $((OPTIND - 1))`
+- Разница `":u:p:sn"` — двоеточие после буквы = флаг требует значение
+- Разница `:` в начале строки — silent mode (сами обрабатываем `\?` и `:`)
+
+**Вопросы для самопроверки:**
+- Что произойдёт если пользователь запустит `./script.sh -u -p 22022`? (`-u` попробует взять `-p` как username → баг с валидацией)
+- Как поддержать длинные опции `--username=evgeniy`? (getopts — только короткие; для длинных надо `getopt` или ручной парсинг)
+- Как накопить permitted-опции для reuse в других скриптах?
+
+---
+
+### Эксперимент 2 🧠 — Идемпотентность: три паттерна которые обязан знать DevOps
+
+**Что делаем:** проходим три классических паттерна идемпотентности, применяем к реальному коду.
+
+**Паттерн 1: "Проверь → сделай если нужно"**
+```bash
+# ПЛОХО (упадёт если пользователь уже есть, set -e остановит скрипт)
+useradd deploy
+
+# ХОРОШО
+if ! id deploy &>/dev/null; then
+    useradd deploy
+    echo "Пользователь deploy создан"
+else
+    echo "Пользователь deploy уже существует"
+fi
+```
+
+**Паттерн 2: "Замени если не так, добавь если нет" (для конфигов)**
+
+Функция из твоего же скрипта — идеальный пример:
+```bash
+set_sshd_option() {
+    local key="$1"
+    local value="$2"
+    if grep -qE "^#?\s*${key}\s+" "$SSHD_CONFIG"; then
+        # Опция есть (возможно закомментирована) — заменяем
+        sed -i "s|^#\?\s*${key}\s\+.*|${key} ${value}|" "$SSHD_CONFIG"
+    else
+        # Опции нет — добавляем
+        echo "${key} ${value}" >> "$SSHD_CONFIG"
+    fi
+}
+```
+
+**Паттерн 3: "Работай с целевым состоянием" (для наборов)**
+
+```bash
+# ПЛОХО (каждый прогон дописывает пользователя в группу — потенциально задваивает)
+usermod -aG sudo deploy   # -a = append, не проверяет что уже там
+
+# ХОРОШО
+if ! id -nG deploy | grep -qw sudo; then
+    usermod -aG sudo deploy
+fi
+```
+
+**Задание:** пройди по своему `initial-server-hardening.sh` и найди **все** места где идёмпотентность обеспечена — и **все** места где может ломаться при повторном запуске. Составь список в заметках.
+
+**Тест:** запусти свой скрипт **дважды подряд** на чистой виртуалке. Между запусками — `apt-get remove --purge` того что установил (нет, лучше не надо!). Просто запусти второй раз. Всё должно пройти без ошибок и без `[WARN]`.
+
+**Что записать:**
+- Список идемпотентных мест в твоём скрипте
+- Список неидемпотентных (если найдёшь) + предложение как исправить
+- Разница `useradd` vs `adduser` (последняя — интерактивная обёртка, для скриптов не подходит)
+
+**Вопросы:**
+- `mkdir -p /foo/bar` — идемпотентно? (Да, `-p` = "создай если нет, не ругайся если есть")
+- `rm -f file` — идемпотентно? (Да, `-f` = не ругаться если файла нет)
+- `ln -s /a /b` — идемпотентно? (Нет! Второй запуск упадёт с "file exists". Надо `ln -sf` для перезаписи)
+
+---
+
+### Эксперимент 3 🧠 — Обработка ошибок и накопление статуса
+
+**Что делаем:** учимся правильно накапливать статус выполнения скрипта, чтобы финальный отчёт был честным.
+
+**Проблема твоего скрипта:** финальный блок `[✅ HARDENING ЗАВЕРШЁН]` показывает всё как выполненное, даже если какой-то пункт упал с `log_warn`. Исправляем.
+
+**Паттерн: массив ошибок + счётчики**
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Глобальные счётчики
+declare -a ERRORS=()
+declare -a WARNINGS=()
+STATUS_OK=0
+STATUS_WARN=0
+STATUS_ERR=0
+
+record_ok() {
+    log_ok "$1"
+    ((STATUS_OK++))
+}
+
+record_warn() {
+    log_warn "$1"
+    WARNINGS+=("$1")
+    ((STATUS_WARN++))
+}
+
+record_error() {
+    log_error "$1"
+    ERRORS+=("$1")
+    ((STATUS_ERR++))
+}
+
+# Пример использования
+if systemctl disable --now avahi-daemon 2>/dev/null; then
+    record_ok "avahi-daemon отключён"
+else
+    record_warn "avahi-daemon не удалось отключить (возможно не установлен)"
+fi
+
+# Финальный отчёт
+print_summary() {
+    echo ""
+    echo "═══════════════════════════════════════════"
+    echo "  ИТОГИ"
+    echo "═══════════════════════════════════════════"
+    echo "  ✓ Успешно:      $STATUS_OK"
+    echo "  ⚠ Предупреждений: $STATUS_WARN"
+    echo "  ✗ Ошибок:       $STATUS_ERR"
+    echo ""
+    
+    if (( STATUS_WARN > 0 )); then
+        echo "Предупреждения:"
+        printf '  - %s\n' "${WARNINGS[@]}"
+    fi
+    
+    if (( STATUS_ERR > 0 )); then
+        echo ""
+        echo "Ошибки (требуют вмешательства):"
+        printf '  - %s\n' "${ERRORS[@]}"
+        return 1  # Скрипт завершится с ненулевым кодом
+    fi
+    
+    return 0
+}
+
+trap 'print_summary' EXIT
+```
+
+**Задание:** внедри эту логику в `initial-server-hardening.sh`. Замени все `log_ok` → `record_ok`, `log_warn` → `record_warn`.
+
+**Тест:** запусти на виртуалке где заведомо чего-то нет (например, снеси `cups` перед запуском). В финале должен быть warning + правильный exit code.
+
+**Что записать:**
+- Что такое `declare -a` (объявление массива)
+- Что делает `((STATUS_OK++))` — арифметика в bash (двойные скобки)
+- Разница `${WARNINGS[@]}` vs `${WARNINGS[*]}` — то же что `$@` vs `$*`
+
+**Вопросы:**
+- Что произойдёт если массив пустой и я делаю `printf '%s\n' "${ERRORS[@]}"`? (Ничего не напечатает — правильное поведение)
+- Как безопасно проверить массив на пустоту? (`(( ${#ERRORS[@]} > 0 ))` или `[[ ${#ERRORS[@]} -gt 0 ]]`)
+- Что произойдёт с `set -e` если `((STATUS_OK++))` вернёт 0? (Упадёт! Потому что postfix `++` возвращает **старое** значение. Первое `((counter++))` при `counter=0` вернёт 0 = failure. Обходы: `((++STATUS_OK))` или `STATUS_OK=$((STATUS_OK + 1))` или `((STATUS_OK++)) || true`)
+
+---
+
+### Эксперимент 4 🧠 — Trap: cleanup и обработка сигналов
+
+**Что делаем:** учимся правильно чистить временные файлы через trap, обрабатывать Ctrl+C.
+
+**Задача:** написать скрипт, который создаёт временные файлы, работает 30 секунд, и **всегда** чистит за собой — даже если пользователь нажмёт Ctrl+C или скрипт упадёт.
+
+**Плохой код:**
+```bash
+#!/bin/bash
+TMPDIR="/tmp/mytest.$$"
+mkdir "$TMPDIR"
+echo "работаю..."
+sleep 30
+rm -rf "$TMPDIR"  # ← не выполнится при Ctrl+C или ошибке
+```
+
+**Хороший код:**
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Создаём tempdir с уникальным именем
+TMPDIR=$(mktemp -d)
+echo "Временная директория: $TMPDIR"
+
+# Функция очистки
+cleanup() {
+    local exit_code=$?
+    echo "Cleanup (exit code: $exit_code)"
+    rm -rf "$TMPDIR"
+    exit "$exit_code"
+}
+
+# trap на EXIT срабатывает при ЛЮБОМ выходе:
+# - нормальное завершение
+# - set -e при ошибке
+# - Ctrl+C (SIGINT)
+# - SIGTERM
+# - kill сигналы (кроме SIGKILL)
+trap cleanup EXIT
+
+# Работаем
+echo "Работаю... (нажми Ctrl+C для теста)"
+touch "$TMPDIR/test1"
+sleep 30
+touch "$TMPDIR/test2"
+echo "Готово"
+```
+
+**Тесты:**
+```bash
+# Тест 1: нормальное завершение
+./cleanup-test.sh
+ls /tmp/tmp.*  # не должно быть
+
+# Тест 2: Ctrl+C после 5 секунд
+./cleanup-test.sh
+# нажми Ctrl+C
+ls /tmp/tmp.*  # не должно быть
+
+# Тест 3: ошибка внутри
+# добавь в скрипт `false` перед sleep, запусти
+./cleanup-test.sh
+ls /tmp/tmp.*  # не должно быть
+```
+
+**Продвинутая версия — разные traps на разные сигналы:**
+```bash
+handle_sigint() {
+    echo ""
+    echo "Получен Ctrl+C, выхожу..."
+    exit 130   # 128 + 2 (SIGINT)
+}
+
+handle_sigterm() {
+    echo "Получен SIGTERM, штатное завершение..."
+    exit 143   # 128 + 15 (SIGTERM)
+}
+
+handle_err() {
+    local lineno=$1
+    echo "Ошибка на строке $lineno"
+}
+
+trap cleanup EXIT
+trap handle_sigint INT
+trap handle_sigterm TERM
+trap 'handle_err $LINENO' ERR
+```
+
+**Что записать:**
+- Список сигналов: `EXIT`, `INT` (Ctrl+C), `TERM`, `HUP`, `ERR`
+- Разница между `EXIT` (при любом выходе) и `ERR` (только при ненулевом exit code)
+- Почему `SIGKILL` нельзя перехватить (это фундаментальное свойство ядра)
+- Что делает `exit 130` — конвенция "128 + номер сигнала"
+
+**Вопросы:**
+- Что произойдёт если внутри trap-функции произойдёт ошибка? (Trap не защищает сам себя от ошибок)
+- Как сделать trap только для конкретной функции (не глобально)? (Внутри функции: `trap ... RETURN` — сработает при выходе из функции)
+- Можно ли навесить два trap на один сигнал? (Нет, второй перезапишет первый. Если нужны две функции — вызывай обе внутри одной handler-функции)
+
+---
+
+### Эксперимент 5 🧠 — Unit-тесты через bats
+
+**Что делаем:** пишем настоящие unit-тесты для функций из `initial-server-hardening.sh`. Это отличает **написание скрипта** от **инжиниринг скрипта**.
+
+**Установка bats** (Bash Automated Testing System):
+```bash
+sudo apt install bats -y
+```
+
+**Первый тест-файл `tests/hardening.bats`:**
+```bash
+#!/usr/bin/env bats
+
+# Импорт функций из основного скрипта
+# (для тестирования функций без запуска всего скрипта)
+setup() {
+    # Заглушки для окружения
+    SSHD_CONFIG="$(mktemp)"
+    cat > "$SSHD_CONFIG" <<EOF
+# Test sshd_config
+Port 22
+#PermitRootLogin prohibit-password
+PasswordAuthentication yes
+EOF
+
+    # Загружаем функции из скрипта (source без запуска main)
+    source_functions_from_hardening
+}
+
+source_functions_from_hardening() {
+    # Извлекаем только определения функций
+    eval "$(sed -n '/^set_sshd_option()/,/^}/p' ../initial-server-hardening.sh)"
+}
+
+teardown() {
+    rm -f "$SSHD_CONFIG"
+}
+
+@test "set_sshd_option заменяет существующую опцию" {
+    set_sshd_option "PasswordAuthentication" "no"
+    run grep "^PasswordAuthentication" "$SSHD_CONFIG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "PasswordAuthentication no" ]
+}
+
+@test "set_sshd_option раскомментирует закомментированную опцию" {
+    set_sshd_option "PermitRootLogin" "no"
+    run grep "^PermitRootLogin" "$SSHD_CONFIG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "PermitRootLogin no" ]
+}
+
+@test "set_sshd_option добавляет отсутствующую опцию" {
+    set_sshd_option "MaxAuthTries" "3"
+    run grep "^MaxAuthTries" "$SSHD_CONFIG"
+    [ "$status" -eq 0 ]
+    [ "$output" = "MaxAuthTries 3" ]
+}
+
+@test "set_sshd_option идемпотентен (двойной вызов = один результат)" {
+    set_sshd_option "PermitRootLogin" "no"
+    set_sshd_option "PermitRootLogin" "no"
+    run bash -c "grep -c '^PermitRootLogin' '$SSHD_CONFIG'"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+}
+```
+
+**Запуск:**
+```bash
+bats tests/hardening.bats
+```
+
+**Что должно получиться:**
+```
+ ✓ set_sshd_option заменяет существующую опцию
+ ✓ set_sshd_option раскомментирует закомментированную опцию
+ ✓ set_sshd_option добавляет отсутствующую опцию
+ ✓ set_sshd_option идемпотентен (двойной вызов = один результат)
+
+4 tests, 0 failures
+```
+
+**Что записать:**
+- Синтаксис bats: `@test "..." { ... }`
+- Переменные `$status` (exit code последней команды через `run`), `$output` (её stdout)
+- Функции `setup()` и `teardown()` — вызываются до/после каждого теста
+- Зачем тестирование — при рефакторинге скрипта через 3 месяца ты **уверен** что не сломал работающую логику
+
+**Вопросы:**
+- Как тестировать функцию которая делает `apt install` (нельзя в CI)? (Мокать через `command` — override PATH, подменить `apt` на скрипт-stub)
+- Что даёт CI на bats? (На каждый commit прогонять тесты автоматически — не сломал ли что-то новое)
+- Разница между `run` в bats и обычным вызовом функции? (`run` захватывает status/output, не роняет тест при ненулевом exit; обычный вызов роняет)
+
+---
+
+### Артефакты для Git
+
+```
+artifacts/unit-06-bash/
+├── server-init.sh              # финальная production-версия
+├── tests/
+│   └── server-init.bats        # bats-тесты
+└── README.md                   # как запускать, что делает
+
+notes/unit-06-bash.md            # 5 экспериментов + ключевые выводы для дежурства
+```
+
+**Требования к `server-init.sh`:**
+- [ ] getopts parsing аргументов (эксперимент 1)
+- [ ] Полная идемпотентность (эксперимент 2) — тесты двойным запуском проходят
+- [ ] Накопление статуса ошибок/warnings (эксперимент 3)
+- [ ] trap для cleanup (эксперимент 4)
+- [ ] ShellCheck 0 warnings
+- [ ] Минимум 5 bats-тестов на ключевые функции
+- [ ] `--help` / `-h` выводит справку с примерами
+- [ ] `--dry-run` показывает что было бы сделано
 
 ### Тест юнита 6
 
@@ -1699,16 +2204,136 @@ notes/unit-05-firewall-hardening.md  # 5 экспериментов + ключе
 3. `$@` vs `$*` (с кавычками и без).
 4. Как обработать ошибку и сделать cleanup (удалить tmp-файлы)?
 5. Однострочник: пинговать IP из файла, выводить только недоступные.
+6. **Новый:** зачем нужны bats-тесты для bash-скрипта, если скрипт "и так работает"?
+7. **Новый:** почему `((counter++))` может уронить скрипт с `set -e`? Как обойти?
 
 <details><summary>Эталонные ответы</summary>
 
-1. `-e` — exit при ошибке; `-u` — ошибка при использовании неинициализированной переменной; `-o pipefail` — exit code пайплайна = последней упавшей команды.
-2. Идемпотентность = можно запускать многократно с тем же результатом. **НЕ:** `useradd deploy`. **Да:** `id deploy &>/dev/null || useradd deploy`.
-3. `"$@"` — каждый аргумент отдельным словом. `"$*"` — склеены в одну строку. **Используй всегда `"$@"`**.
-4. `TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT`
+1. `-e` — exit при первой ошибке (ненулевом exit code); `-u` — ошибка при использовании неинициализированной переменной; `-o pipefail` — exit code пайплайна = последней **упавшей** команды (а не последней вообще). Без этих флагов баги в long-running скриптах могут долго оставаться незамеченными.
+
+2. Идемпотентность = можно запускать многократно с тем же результатом, без побочных эффектов. **НЕ идемпотентно:** `useradd deploy` — второй прогон упадёт "user exists". **Идемпотентно:** `id deploy &>/dev/null || useradd deploy` (создать только если нет). Или для пакетов: `apt-get install -y nginx` — сам идемпотентен (если пакет уже стоит, ничего не делает).
+
+3. `"$@"` — каждый аргумент отдельным словом, сохраняя пробелы внутри аргументов. `"$*"` — все аргументы склеены в одну строку через первый символ IFS (обычно пробел). Без кавычек оба ведут себя одинаково — слова разбиваются по IFS. **Используй всегда `"$@"`** при передаче аргументов дальше — в 99% случаев это то что нужно.
+
+4. Через `trap`:
+```bash
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+```
+`trap ... EXIT` сработает при любом выходе — нормальном, по ошибке (`set -e`), Ctrl+C, kill. Единственное исключение — SIGKILL (его нельзя перехватить).
+
 5. `while read -r ip; do ping -c1 -W1 "$ip" &>/dev/null || echo "$ip"; done < ips.txt`
+Через xargs параллельно (быстрее для большого списка): `xargs -I{} -P10 sh -c 'ping -c1 -W1 {} &>/dev/null || echo {}' < ips.txt`
+
+6. Скрипт "работает" сейчас — но через 3 месяца ты его будешь править (новый инструмент добавить, порт поменять и т.д.). Без тестов ты не узнаешь что **сломал** старую логику. Например, случайно изменил регулярку в `set_sshd_option` — теперь она пропускает опцию с несколькими пробелами. Bats-тест бы это поймал за 0.5 секунды. Плюс: тесты — это **документация на функции**. Смотришь тест — понимаешь что функция должна делать.
+
+7. Причина: postfix `++` возвращает **старое** значение. Первое `((counter++))` при `counter=0` возвращает `0` = failure = `set -e` роняет скрипт.
+**Обходы:**
+- Prefix: `((++counter))` — возвращает **новое** значение (`1`)
+- Явная арифметика: `counter=$((counter + 1))`
+- Гарантированный успех: `((counter++)) || true`
+- Или инициализировать с 1 если возможно
 
 </details>
+
+---
+
+### 📖 Мини-словарь bash / shell scripting
+
+Формат как в юнитах 3-5. Делай Anki-карточки по 5-7 в день из тех слов что встретишь в `man bash`, ShellCheck wiki, документации.
+
+#### 🐚 Shell — базовые термины
+
+| Английский | Русский | Где встречается |
+|------------|---------|-----------------|
+| **shell** | оболочка (интерпретатор команд) | bash, sh, zsh |
+| **script** | скрипт | .sh файл |
+| **shebang** | шебанг — `#!/usr/bin/env bash` | первая строка скрипта |
+| **built-in** | встроенная команда (в самом shell) | `cd`, `echo`, `getopts` |
+| **external command** | внешняя команда (отдельный файл) | `ls`, `grep`, `awk` |
+| **subshell** | подоболочка (`( ... )` или `$(...)`) | форк процесса |
+| **process substitution** | подстановка процесса `<(cmd)` | `diff <(ls) <(ls -a)` |
+| **command substitution** | подстановка команды `$(cmd)` | `now=$(date)` |
+| **parameter expansion** | подстановка параметров `${VAR}` | `${VAR:-default}` |
+| **globbing** | сопоставление по шаблону | `*.txt`, `file?` |
+| **wildcard** | подстановочный символ | `*`, `?`, `[abc]` |
+| **heredoc** | документ здесь `<<EOF` | multiline input |
+| **herestring** | строка здесь `<<<` | `grep pattern <<< "$var"` |
+
+#### 🎛️ Управляющие конструкции
+
+| Английский | Русский | Контекст |
+|------------|---------|----------|
+| **conditional** | условная конструкция | `if`, `case` |
+| **loop** | цикл | `for`, `while`, `until` |
+| **branch** | ветвление | `if-then-else` |
+| **iterate** | итерировать | `for i in ...` |
+| **exit code / status** | код возврата | `$?`, 0 = success, ≠0 = failure |
+| **return value** | значение возврата | `return N` в функции |
+| **pipe** | канал (пайп) | `\|` |
+| **redirect** | перенаправление | `>`, `<`, `>>`, `2>&1` |
+| **pipeline** | конвейер команд | `cmd1 \| cmd2 \| cmd3` |
+| **filter** | фильтр | `grep`, `awk`, `sed` |
+| **stream** | поток | stdin, stdout, stderr |
+
+#### 🔍 Аргументы и опции
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **flag** | флаг | `-v`, `-f` |
+| **option** | опция (синоним flag) | `-p PORT` |
+| **argument** | аргумент | позиционный: `$1`, `$2` |
+| **positional argument** | позиционный аргумент | `./script.sh arg1 arg2` |
+| **required argument** | обязательный аргумент | без него ошибка |
+| **optional argument** | необязательный аргумент | есть дефолт |
+| **flag argument / short option** | короткий флаг | `-v` |
+| **long option** | длинный флаг | `--verbose` |
+| **switch** | переключатель (флаг без значения) | `--dry-run` |
+| **parse arguments** | разобрать аргументы | `getopts` в цикле |
+
+#### ⚠️ Ошибки и сигналы
+
+| Английский | Русский | Где |
+|------------|---------|-----|
+| **trap** | ловушка (перехват сигнала) | `trap cmd EXIT` |
+| **signal** | сигнал | SIGINT, SIGTERM, SIGKILL |
+| **handler** | обработчик | функция для trap |
+| **graceful shutdown** | штатное завершение | сохранить состояние, потом exit |
+| **cleanup** | очистка (за собой) | удалить tmp-файлы |
+| **rollback** | откат | восстановить прежнее состояние |
+| **fail fast** | падать быстро | `set -e` — при первой ошибке |
+| **silent failure** | тихий сбой (плохо!) | ошибка не залогирована |
+
+#### 🔧 Часто встречается в bash-контексте
+
+| Английский | Русский | |
+|------------|---------|--|
+| **idempotent** | идемпотентный | результат одинаков при повторе |
+| **race condition** | гонка (условий) | параллельные процессы конкурируют |
+| **stub** | заглушка | mock-функция для теста |
+| **mock** | подделка | замена реальной команды в тесте |
+| **assert** | утверждение | проверка "это правда так?" |
+| **fixture** | фикстура | подготовленные данные для теста |
+| **teardown** | демонтаж (очистка после теста) | после каждого теста |
+| **setup** | настройка (перед тестом) | подготовка окружения |
+| **regex / regular expression** | регулярное выражение | `[[ $x =~ ^[0-9]+$ ]]` |
+| **variable expansion** | подстановка переменной | `$VAR` → значение |
+| **word splitting** | разбиение на слова | по IFS |
+| **quoting** | обрамление кавычками | `"$var"` vs `$var` |
+
+#### Готовые 10 Anki-карточек на старт
+
+1. `shebang` → первая строка `#!/usr/bin/env bash` — указание интерпретатора
+2. `heredoc` → `cat <<EOF ... EOF` — многострочный ввод
+3. `parameter expansion with default` → `${VAR:-default}` — значение или дефолт если пусто
+4. `command substitution` → `now=$(date)` — результат команды в переменную
+5. `pipeline` → `cmd1 \| cmd2` — вывод cmd1 → ввод cmd2
+6. `to trap a signal` → перехватить сигнал через `trap`
+7. `graceful shutdown` → штатное завершение (cleanup перед exit)
+8. `idempotent script` → идемпотентный скрипт (повторный запуск = тот же результат)
+9. `fail fast` → падать при первой ошибке (`set -e`)
+10. `exit code 0` → успех; любой другой = ошибка
+
 
 ---
 

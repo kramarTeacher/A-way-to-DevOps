@@ -90,8 +90,6 @@ log_section "2. SSH: ключи, no password, no root"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 
-log_section "2. SSH: ключи, no password, no root"
-
 # Проверка: установлен ли SSH-сервер
 if ! command -v sshd &>/dev/null; then
     log_warn "SSH-сервер не установлен, устанавливаю..."
@@ -176,6 +174,12 @@ log_section "3. Автообновления безопасности"
 DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades apt-listchanges
 log_ok "unattended-upgrades установлен"
 
+# Вывод инфы по тому, что должно обновляться
+log_info "Проверка Allowed-Origins в 50unattended-upgrades:"
+grep -A 5 "Allowed-Origins" /etc/apt/apt.conf.d/50unattended-upgrades | grep -v "^//" | head -10
+log_warn "По умолчанию активны только -security обновления. Это ок для production."
+log_warn "Если хочешь ставить и -updates автоматически — раскомментируй строку в файле."
+
 cat > /etc/apt/apt.conf.d/20auto-upgrades <<EOF
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
@@ -202,7 +206,9 @@ ufw default allow outgoing >/dev/null
 ufw default deny routed >/dev/null
 
 # КРИТИЧНО: сначала разрешить SSH!
-ufw allow OpenSSH >/dev/null
+SSH_PORT=$(grep -Ei '^Port [0-9]+' "$SSHD_CONFIG" | awk '{print $2}' | head -1) # извлечение порта из конфига
+SSH_PORT="${SSH_PORT:-22}"
+ufw allow "${SSH_PORT}/tcp"
 log_ok "OpenSSH разрешён"
 
 # Если нужны веб-порты — раскомментируй:
@@ -261,9 +267,11 @@ SERVICES_TO_DISABLE=(
 for service in "${SERVICES_TO_DISABLE[@]}"; do
     if systemctl list-unit-files "${service}.service" &>/dev/null; then
         if systemctl is-active "${service}" &>/dev/null; then
-            systemctl disable --now "${service}" 2>/dev/null \
-                && log_ok "Отключён: $service" \
-                || log_warn "Не удалось отключить: $service"
+            if systemctl disable --now "${service}" 2>/dev/null; then
+                log_ok "Отключён: $service"
+            else
+                log_warn "Не удалось отключить: $service"
+            fi
         else
             log_ok "Уже отключён: $service"
         fi
